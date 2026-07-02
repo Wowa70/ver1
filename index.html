@@ -2,8 +2,8 @@
   <html lang="ru">
   <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-    <title>RTA Simple Pro</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <title>RTA Simple Pro v4.1</title>
     <style>
       :root {
         --bg: #0a0c10; --panel: #161b22; --accent: #ff7a18; --txt: #d8e1ec; --mut: #6f7d8f;
@@ -13,22 +13,45 @@
         margin: 0; background: var(--bg); color: var(--txt);
         font-family: ui-monospace, monospace; overflow: hidden;
         display: flex; flex-direction: column; height: 100vh;
+        /* Учет вырезов на смартфонах (челки) */
+        padding-top: env(safe-area-inset-top);
       }
       header {
-        padding: 15px; background: var(--panel); border-bottom: 1px solid #30363d;
+        padding: 10px 15px; background: var(--panel); border-bottom: 1px solid #30363d;
         display: flex; justify-content: space-between; align-items: center;
+        z-index: 10;
       }
       .controls {
         display: flex; gap: 8px; padding: 10px; background: var(--panel);
         flex-wrap: wrap; justify-content: center; border-bottom: 1px solid #30363d;
+        z-index: 10;
       }
       button {
         background: #21262d; color: var(--txt); border: 1px solid #30363d;
         padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 12px;
       }
       button.active { background: var(--accent); color: #000; border-color: var(--accent); font-weight: bold; }
-      main { flex: 1; position: relative; }
+
+      main {
+        flex: 1; position: relative;
+        /* Оставляем место снизу для панелей браузера */
+        margin-bottom: env(safe-area-inset-bottom);
+      }
       canvas { width: 100%; height: 100%; display: block; }
+
+      /* Цифровой индикатор ПИКА прямо на экране */
+      #peak-display {
+        position: absolute; top: 15px; right: 15px;
+        background: rgba(0, 0, 0, 0.6);
+        color: var(--accent);
+        padding: 5px 10px;
+        border-radius: 4px;
+        font-size: 14px;
+        font-weight: bold;
+        border: 1px solid var(--accent);
+        pointer-events: none;
+        z-index: 20;
+      }
       #status { font-size: 10px; color: var(--mut); }
     </style>
   </head>
@@ -36,7 +59,7 @@
 
   <header>
     <div style="font-weight: bold; letter-spacing: 1px;">RTA SIMPLE <span id="status">OFFLINE</span></div>
-    <button id="startBtn" style="background: var(--accent); color: #000;">START</button>
+    <button id="startBtn" style="background: var(--accent); color: #000; font-weight: bold;">START</button>
   </header>
 
   <div class="controls">
@@ -51,6 +74,8 @@
   </div>
 
   <main>
+    <!-- Индикатор уровня -->
+    <div id="peak-display">RMS: -∞ dB</div>
     <canvas id="canvas"></canvas>
   </main>
 
@@ -61,6 +86,7 @@
     const ctx = canvas.getContext('2d');
     const startBtn = document.getElementById('startBtn');
     const statusLabel = document.getElementById('status');
+    const peakDisplay = document.getElementById('peak-display');
 
     async function initAudio() {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -83,12 +109,10 @@
       }
     }
 
-    // Генератор шумов
     function setNoise(type) {
       if (!audioCtx) return;
       if (noiseNode) { noiseNode.stop(); noiseNode = null; }
       currentNoise = type;
-
       if (type === 'none') return;
 
       const bufferSize = audioCtx.sampleRate * 2;
@@ -98,8 +122,7 @@
       if (type === 'white') {
         for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
       } else if (type === 'pink') {
-        let b0, b1, b2, b3, b4, b5, b6;
-        b0 = b1 = b2 = b3 = b4 = b5 = b6 = 0.0;
+        let b0=0, b1=0, b2=0, b3=0, b4=0, b5=0, b6=0;
         for (let i = 0; i < bufferSize; i++) {
           let white = Math.random() * 2 - 1;
           b0 = 0.99886 * b0 + white * 0.0555179;
@@ -112,7 +135,6 @@
           data[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6) * 0.11;
         }
       }
-
       noiseNode = audioCtx.createBufferSource();
       noiseNode.buffer = buffer;
       noiseNode.loop = true;
@@ -134,7 +156,7 @@
       ctx.fillStyle = '#0a0c10';
       ctx.fillRect(0, 0, w, h);
 
-      // Сетка частот
+      // Сетка
       ctx.strokeStyle = '#1f2a36';
       ctx.fillStyle = '#6f7d8f';
       ctx.font = '10px monospace';
@@ -144,43 +166,61 @@
         ctx.fillText(f >= 1000 ? (f/1000)+'k' : f, x + 2, h - 5);
       });
 
-      // Отрисовка спектра
+      // Отрисовка спектра + поиск пика
       ctx.beginPath();
       ctx.strokeStyle = '#ff7a18';
       ctx.lineWidth = 2;
 
+      let maxVal = 0;
+      let maxBin = 0;
+      let sum = 0;
+
       const binWidth = (audioCtx.sampleRate / 2) / analyser.frequencyBinCount;
       for (let i = 0; i < dataArray.length; i++) {
+        const val = dataArray[i];
+        sum += val;
+        if (val > maxVal) { maxVal = val; maxBin = i; }
+
         const freq = i * binWidth;
         if (freq < 20) continue;
         if (freq > 20000) break;
         const x = getLogX(freq, w);
-        const y = h - (dataArray[i] / 255 * h);
+        const y = h - (val / 255 * h);
         if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       }
       ctx.stroke();
+
+      // 1. Рисуем маркер самого громкого пика прямо на графике
+      const peakFreq = maxBin * binWidth;
+      if (peakFreq >= 20 && peakFreq <= 20000) {
+        const px = getLogX(peakFreq, w);
+        const py = h - (maxVal / 255 * h);
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc(px, py, 3, 0, Math.PI * 2);
+        ctx.fill();
+        // Подпись частоты пика
+        ctx.font = '10px monospace';
+        ctx.fillText(Math.round(peakFreq) + 'Hz', px - 15, py - 10);
+      }
+
+      // 2. Обновляем цифровой индикатор RMS вверху
+      let avg = sum / dataArray.length;
+      let db = 20 * Math.log10(avg / 255);
+      peakDisplay.textContent = `RMS: ${db === -Infinity ? '-∞' : db.toFixed(1)} dB`;
     }
 
     startBtn.onclick = () => {
       if (!audioCtx) {
         initAudio();
       } else {
-        location.reload(); // Самый простой способ остановить всё
+        location.reload();
       }
     };
 
-    document.getElementById('btn-none').onclick = (e) => {
-      setNoise('none');
-      updateBtn(e.target);
-    };
-    document.getElementById('btn-white').onclick = (e) => {
-      setNoise('white');
-      updateBtn(e.target);
-    };
-    document.getElementById('btn-pink').onclick = (e) => {
-      setNoise('pink');
-      updateBtn(e.target);
-    };
+    document.getElementById('btn-none').onclick = (e) => { setNoise('none'); updateBtn(e.target); };
+    document.getElementById('btn-white').onclick = (e) => { setNoise('white'); updateBtn(e.target); };
+    document.getElementById('btn-pink').onclick = (e) => { setNoise('pink'); updateBtn(e.target); };
 
     function updateBtn(activeBtn) {
       document.querySelectorAll('.controls button').forEach(b => b.classList.remove('active'));
@@ -189,4 +229,3 @@
   </script>
   </body>
   </html>
-
